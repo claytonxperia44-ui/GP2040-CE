@@ -200,7 +200,73 @@ void AnalogInput::process() {
             gamepad->state.ry = clampedY;
         }
     }
+	// ============================================================
+	// Giro Circular Somado ao Analógico Físico (L1 + R1)
+	// Colocar no final de AnalogInput::process() em src/addons/analog.cpp
+	// ============================================================
+
+	constexpr uint32_t combo_mask = GAMEPAD_MASK_L1 | GAMEPAD_MASK_R1;
+
+	if ((gamepad->state.buttons & combo_mask) == combo_mask) {
+
+		static uint32_t last_left_ms = 0;
+		static uint8_t left_step     = 0;
+		static uint32_t left_delay   = 12;
+		static uint32_t rng_state    = 0x9E3779B9;
+
+		auto fast_rand = [&]() -> uint32_t {
+			rng_state ^= rng_state << 13;
+			rng_state ^= rng_state >> 17;
+			rng_state ^= rng_state << 5;
+			return rng_state;
+		};
+
+		auto clamp_axis = [](int32_t value) -> uint16_t {
+			if (value < 0) return 0;
+			if (value > 65535) return 65535;
+			return static_cast<uint16_t>(value);
+		};
+
+		const uint32_t now = to_ms_since_boot(get_absolute_time());
+
+		if ((now - last_left_ms) >= left_delay) {
+			left_step = (left_step + 1) & 15;
+			last_left_ms = now;
+			left_delay = 10 + (fast_rand() & 7);
+		}
+
+		static const int16_t circle_x[16] = {
+			 128,  118,   91,   49,    0,  -49,  -91, -118,
+			-128, -118,  -91,  -49,    0,   49,   91,  118
+		};
+
+		static const int16_t circle_y[16] = {
+			   0,   49,   91,  118,  128,  118,   91,   49,
+			   0,  -49,  -91, -118, -128, -118,  -91,  -49
+		};
+
+		// 1. Lê a posição física real que você está fazendo na alavanca (-32768 a +32767)
+		int32_t phys_x = static_cast<int32_t>(gamepad->state.lx) - 32768;
+		int32_t phys_y = static_cast<int32_t>(gamepad->state.ly) - 32768;
+
+		// 2. Reduz a posição física para 45% para abrir espaço para o círculo não bater no limite
+		phys_x = (phys_x * 45) / 100;
+		phys_y = (phys_y * 45) / 100;
+
+		// 3. Calcula o giro circular com raio de 18000 (~55% do curso total)
+		const int32_t left_intensity = 18000 + static_cast<int32_t>(fast_rand() & 1023) - 512;
+
+		int32_t lx_offset = (left_intensity * circle_x[left_step]) >> 7;
+		int32_t ly_offset = (left_intensity * circle_y[left_step]) >> 7;
+
+		// 4. Combina o centro (32768) + sua direção física + o movimento circular
+		gamepad->state.lx = clamp_axis(32768 + phys_x + lx_offset);
+		gamepad->state.ly = clamp_axis(32768 + phys_y + ly_offset);
+	}
+
+
 }
+
 
 float AnalogInput::readPin(Pin_t pin_adc, uint32_t center, uint32_t minimum, uint32_t maximum) {
     adc_select_input(pin_adc);
