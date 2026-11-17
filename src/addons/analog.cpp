@@ -200,9 +200,9 @@ void AnalogInput::process() {
             gamepad->state.ry = clampedY;
         }
     }
-	// ============================================================
-	// Giro Circular Somado ao Analógico Físico (L1 + R1)
-	// Colocar no final de AnalogInput::process() em src/addons/analog.cpp
+		// ============================================================
+	// Giro Circular de Alta Resolução (32 pontos) + Curva Progressiva
+	// Ativado com L1 + R1 em AnalogInput::process()
 	// ============================================================
 
 	constexpr uint32_t combo_mask = GAMEPAD_MASK_L1 | GAMEPAD_MASK_R1;
@@ -211,7 +211,7 @@ void AnalogInput::process() {
 
 		static uint32_t last_left_ms = 0;
 		static uint8_t left_step     = 0;
-		static uint32_t left_delay   = 12;
+		static uint32_t left_delay   = 7;
 		static uint32_t rng_state    = 0x9E3779B9;
 
 		auto fast_rand = [&]() -> uint32_t {
@@ -229,40 +229,56 @@ void AnalogInput::process() {
 
 		const uint32_t now = to_ms_since_boot(get_absolute_time());
 
+		// Como agora são 32 passos, reduzimos o delay para 6 a 9 ms por passo
+		// (mantém a mesma velocidade de ~220ms por volta, mas com o dobro de suavidade)
 		if ((now - last_left_ms) >= left_delay) {
-			left_step = (left_step + 1) & 15;
+			left_step = (left_step + 1) & 31; // 0 a 31 (32 pontos)
 			last_left_ms = now;
-			left_delay = 10 + (fast_rand() & 7);
+			left_delay = 6 + (fast_rand() & 3);
 		}
 
-		static const int16_t circle_x[16] = {
-			 128,  118,   91,   49,    0,  -49,  -91, -118,
-			-128, -118,  -91,  -49,    0,   49,   91,  118
+		// Curva Senoidal Pura de 32 pontos (Escala -128 a +128)
+		static const int16_t circle_x[32] = {
+			 128,  126,  118,  106,   91,   71,   49,   25,
+			   0,  -25,  -49,  -71,  -91, -106, -118, -126,
+			-128, -126, -118, -106,  -91,  -71,  -49,  -25,
+			   0,   25,   49,   71,   91,  106,  118,  126
 		};
 
-		static const int16_t circle_y[16] = {
-			   0,   49,   91,  118,  128,  118,   91,   49,
-			   0,  -49,  -91, -118, -128, -118,  -91,  -49
+		static const int16_t circle_y[32] = {
+			   0,   25,   49,   71,   91,  106,  118,  126,
+			 128,  126,  118,  106,   91,   71,   49,   25,
+			   0,  -25,  -49,  -71,  -91, -106, -118, -126,
+			-128, -126, -118, -106,  -91,  -71,  -49,  -25
 		};
 
-		// 1. Lê a posição física real que você está fazendo na alavanca (-32768 a +32767)
-		int32_t phys_x = static_cast<int32_t>(gamepad->state.lx) - 32768;
-		int32_t phys_y = static_cast<int32_t>(gamepad->state.ly) - 32768;
+		// 1. Lê o movimento físico real (-32768 a +32767)
+		int32_t raw_x = static_cast<int32_t>(gamepad->state.lx) - 32768;
+		int32_t raw_y = static_cast<int32_t>(gamepad->state.ly) - 32768;
 
-		// 2. Reduz a posição física para 45% para abrir espaço para o círculo não bater no limite
-		phys_x = (phys_x * 45) / 100;
-		phys_y = (phys_y * 45) / 100;
+		// 2. Calcula a distância que você empurrou a alavanca (aproximação rápida sem raiz quadrada)
+		int32_t abs_x = (raw_x < 0) ? -raw_x : raw_x;
+		int32_t abs_y = (raw_y < 0) ? -raw_y : raw_y;
+		int32_t stick_mag = (abs_x > abs_y) ? (abs_x + (abs_y >> 1)) : (abs_y + (abs_x >> 1));
+		if (stick_mag > 32767) stick_mag = 32767;
 
-		// 3. Calcula o giro circular com raio de 18000 (~55% do curso total)
-		const int32_t left_intensity = 18000 + static_cast<int32_t>(fast_rand() & 1023) - 512;
+		// 3. Curva Dinâmica Inteligente:
+		// Quanto mais você empurra a alavanca física, mais o raio do círculo encolhe suavemente
+		// (Vai de 26000 com a alavanca solta até 14000 com a alavanca toda empurrada)
+		int32_t dynamic_radius = 26000 - ((stick_mag * 12000) >> 15);
+		const int32_t left_intensity = dynamic_radius + static_cast<int32_t>(fast_rand() & 1023) - 512;
+
+		// 4. Reduz o peso físico para 50% usando shift rápido (>> 1) para nunca saturar na borda
+		int32_t phys_x = raw_x >> 1;
+		int32_t phys_y = raw_y >> 1;
 
 		int32_t lx_offset = (left_intensity * circle_x[left_step]) >> 7;
 		int32_t ly_offset = (left_intensity * circle_y[left_step]) >> 7;
 
-		// 4. Combina o centro (32768) + sua direção física + o movimento circular
 		gamepad->state.lx = clamp_axis(32768 + phys_x + lx_offset);
 		gamepad->state.ly = clamp_axis(32768 + phys_y + ly_offset);
 	}
+
 
 
 }
